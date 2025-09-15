@@ -4,8 +4,8 @@ from Code.ParticleFilter.TargetTrackingUKF import TargetTrackingUKF
 from Code.DataLoggers.ConnectedAgent_DataLogger import UPFConnectedAgentDataLogger
 from Code.DataLoggers.TargetTrackingUKF_DataLogger import UKFDatalogger
 from Code.UtilityCode.utility_fuctions import (transform_matrix, sphericalToCartesian, inv_transformation_matrix,
-                                               get_states_of_transform, get_4d_rot_matrix, limit_angle,
-                                               cartesianToSpherical, sphericalToCartesian)
+                                                   get_states_of_transform, get_4d_rot_matrix, limit_angle,
+                                                   cartesianToSpherical, sphericalToCartesian)
 import numpy as np
 import math
 
@@ -14,7 +14,7 @@ class Fixed2DUPF(UPFConnectedAgent):
         super().__init__(id=id, x_ha_0=x_ha_0, drift_correction_bool=drift_correction_bool)
         #TODO fix this in the main UPF class
         self.uwb_measurement = 0.
-        self.set_regeneration_parameters(max_number_of_particles=5)
+        # self.set_regeneration_parameters(max_number_of_particles=5)
         self.dz = dz
 
     def reset(self):

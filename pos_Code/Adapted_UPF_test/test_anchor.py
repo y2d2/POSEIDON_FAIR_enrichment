@@ -1,16 +1,22 @@
 import unittest
 import numpy as np
-from UPF_demo_code.Adapted_UPF.Fixed2DUPF import Fixed2DUPF, Fixed2DUPFDataLogger
-from Code.Simulation.NLOS_Manager import NLOS_Manager
+from pos_Code.Adapted_UPF.Fixed2DUPF import Fixed2DUPF, Fixed2DUPFDataLogger
+# from Code.Simulation.NLOS_Manager import NLOS_Manager
 from Code.DataLoggers.ConnectedAgent_DataLogger import UPFConnectedAgentDataLogger
 from Code.Simulation.BiRobotMovement import drone_flight, run_simulation, Control2D, fix_connected_2D_host, fix_host_fix_connected
 from Code.UtilityCode.utility_fuctions import get_4d_rot_matrix
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Qt5Agg')
+
 class MyTestCase(unittest.TestCase):
-    def init_test(self, sigma_v=0.1, sigma_w=0.1, sigma_uwb=0.1, drifting_host=False):
+    def test_something(self):
+        self.assertEqual(True, False)  # add assertion here
+
+    def init_test(self, sigma_v=0.01, sigma_w=0.01, sigma_uwb=0.2, drifting_host=False):
         # Paper = Relative Transformation Estimation Based on Fusion of Odometry and UWB.py Ranging Data
 
-        self.uwb_time_steps = 1000  # (120 // 0.03)          # Paper simulation time = 120s
+        self.uwb_time_steps = 400  # (120 // 0.03)          # Paper simulation time = 120s
         self.odom_time_step = 0.1
         self.uwb_time_step = 0.1  # Paper experiments UWB.py frequency = 37 Hz
         self.factor = int(self.uwb_time_step / self.odom_time_step)
@@ -22,7 +28,7 @@ class MyTestCase(unittest.TestCase):
 
         self.los = []
         self.drifting_host = drifting_host
-        self.nlos_man = NLOS_Manager(nlos_bias=2.)
+        # self.nlos_man = NLOS_Manager(nlos_bias=2.)
         self.debug = False
 
     def init_drones(self, x_ca_0, h_ca_0, max_range=None):
@@ -37,7 +43,7 @@ class MyTestCase(unittest.TestCase):
         distance = np.linalg.norm(self.drone.x_start - self.host.x_start)
         self.startMeasurement = distance + np.random.randn(1) * self.sigma_uwb
 
-    def run_test(self, nlos_function, name="Unidentified Test"):
+    def run_test(self,  name="Unidentified Test"):
         self.dl = Fixed2DUPFDataLogger(self.host, self.drone, self.ca)
         # self.ca.set_logging(self.dl)
         # self.dl.log_data(0)
@@ -61,8 +67,8 @@ class MyTestCase(unittest.TestCase):
             if i % self.factor == 0:
                 distance = np.linalg.norm(self.drone.x_real[i] - self.host.x_real[i])
                 uwb_measurement = distance + np.random.randn(1)[0] * self.sigma_uwb
-                uwb_measurement, los_state = nlos_function(int(i / self.factor), uwb_measurement)
-                self.los.append(los_state)
+                # uwb_measurement, los_state = nlos_function(int(i / self.factor), uwb_measurement)
+                self.los.append(1)
 
                 if self.drifting_host:
                     x_ha = self.host.x_slam[i]
@@ -91,22 +97,22 @@ class MyTestCase(unittest.TestCase):
     def test_tc1(self):
         # Length of NLOS  is proportional to error on odom?
         z= 0
-        self.init_test(sigma_v=0.01, sigma_w=0.001, sigma_uwb=0.1,
+        self.init_test(sigma_v=0.01, sigma_w=0.01, sigma_uwb=0.1,
                        drifting_host=True)
         self.init_drones(np.array([2, 0, z]), 0, max_range=1)
         c2d = Control2D(self.host)
-        c2d.set_boundries(radius=1)
+        c2d.set_boundries(radius=2)
         run_simulation(self.simulation_time_steps, self.host, self.drone,
                        fix_connected_2D_host, kwargs={"control2d": c2d})
         # run_simulation(self.simulation_time_steps, self.host, self.drone,
                        # fix_host_fix_connected, kwargs={"control2d": c2d})
-        self.ca = Fixed2DUPF("0x000", x_ha_0=np.concatenate((self.host.x_start, [self.host.h_start])))
+        self.ca = Fixed2DUPF("0x000", x_ha_0=np.concatenate((self.host.x_slam[0], [self.host.h_slam[0]])))
         self.ca.set_ukf_parameters(kappa=-1, alpha=1, beta=2)
         self.ca.set_initalisation_parameters(self.sigma_uwb, 12, 1, z, 0.1)
         # self.ca.split_sphere_in_equal_areas(self.startMeasurement[0], 2*self.sigma_uwb, n_azimuth=12, n_heading=1,
         #                                     dz=z, dz_sigma=0.1)
 
-        self.run_test(nlos_function=self.nlos_man.los)
+        self.run_test()
 
         self.dl.plot_self(self.los)
         # self.dl.get_best_particle_log().create_3d_plot()
@@ -114,6 +120,9 @@ class MyTestCase(unittest.TestCase):
         self.dl.get_best_particle_log().plot_ukf_states()
         self.dl.get_best_particle_log().plot_2D_drift()
         plt.show()
+
+    def test_anchor_Loc_corr(self):
+        pass
 
 
 if __name__ == '__main__':
