@@ -24,12 +24,14 @@ class MyTestCase(unittest.TestCase):
         return img
 
     def test_convert_images(self):
-        image_folder = '/home/yuri/Documents/PhD/ROS_WS/sharedDrive/Aerolytics/serr_18_9_25_test/log0002/run/mpa/tracking_front'
-        save_folder = "./correcte_images_autonomous"
+        # image_folder = '/home/yuri/Documents/PhD/ROS_WS/sharedDrive/Aerolytics/serr_18_9_25_test/log0002/run/mpa/tracking_front'
+        image_folder = '/home/yuri/Documents/PhD/ROS_WS/sharedDrive/Aerolytics/serr_18_9_25_test/log0000/run/mpa/qvio_overlay'
+        save_folder = "./correcte_images_for_FAIRD_0"
         if os.path.exists(save_folder):
             shutil.rmtree(save_folder)
         os.mkdir(save_folder)
-        target_size = (1280, 800)
+        # target_size = (1280, 800)
+        target_size = (1280, 896)
         for i in range(0, 4694):
             # make the names with leading zeros
             filename = str(i).zfill(5) + ".png"
@@ -37,7 +39,6 @@ class MyTestCase(unittest.TestCase):
             image_path = os.path.join(image_folder, filename)
             save_image_path = os.path.join(save_folder, filename)
             if os.path.exists(image_path):
-
                 try:
                     with Image.open(image_path) as img:
                         img = self.resize_image_if_needed(img, target_size)
@@ -52,14 +53,15 @@ class MyTestCase(unittest.TestCase):
                 print(f"Warning: {image_path} does not exist.")
 
     def test_create_movie(self):
-        image_folder = "./correcte_images"
+        image_folder = "./correcte_images_for_FAIRD_0"
         fps = 30
         image_files = []
-        for i in range(0 ,12553):
+        for i in range(0 ,4694):
             # make the names with leading zeros
             filename = str(i).zfill(5) + ".png"
             # print(filename)
             image_path = os.path.join(image_folder, filename)
-            image_files.append(image_path)
+            if os.path.exists(image_path):
+                image_files.append(image_path)
         clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip(image_files, fps=fps)
-        clip.write_videofile('long_fligth.mp4')
+        clip.write_videofile('FAIRDay_movie_0.mp4')

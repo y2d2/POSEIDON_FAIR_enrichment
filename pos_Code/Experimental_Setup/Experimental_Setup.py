@@ -1,18 +1,22 @@
 import deprecation
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from pos_Code.ESP_code.ESP_Class import ESP_wifi_module
-from scipy.optimize import minimize
+from scipy.optimize import minimize, least_squares
 
 
 class Experiment():
-    def __init__(self):
+    def __init__(self, debug=False):
         self.odom_columns = ["time", "id", "mag_x", "mag_y", "mag_z", "T",
                             "gx", "gy", "gz", "ax", "ay", "az", "px", "py", "pz", "Anchor"]
         self.range_columns = ["time", "id", "rid", "dist_m", "fp_rssi", "rx_rssi"]
         self.odom_data = pd.DataFrame(columns=self.odom_columns)
         self.range_data = pd.DataFrame(columns=self.range_columns)
+        self.tag_gts_columns = ["time", "id", "px", "py", "pz"]
+        self.tag_gts = pd.DataFrame(columns=self.tag_gts_columns)
+        self.debug = debug
 
     #################################################################################
     #### LOAD DATA
@@ -24,6 +28,8 @@ class Experiment():
         range_data = []
         for i, row in enumerate(data):
             print(f"Processing {(i+1)*100/len(data)}%", end="\r")
+            if self.debug:
+                print(f"Processing {(i+1)*100/len(data)}%")
             odom_row, range_rows = self.parse_row(row)
             odom_data.append(odom_row)
             range_data.extend(range_rows)
@@ -54,6 +60,18 @@ class Experiment():
         return imu_data, ranges
 
     #################################################################################
+    #### DATA CHECKS
+    #################################################################################
+    def check_frequencies(self):
+        for id in self.odom_data['id'].unique():
+            device_data = self.odom_data[self.odom_data['id'] == id].sort_values(by='time')
+            time_diffs = device_data['time'].diff().dropna()/1000
+            mean_freq = 1 / time_diffs.mean()
+            std_freq = time_diffs.std() / (time_diffs.mean() ** 2)
+            print(f"Device {id}: Mean Frequency = {mean_freq:.2f} Hz, Std Dev = {std_freq:.4f} Hz")
+
+
+    #################################################################################
     #### ANCHOR SETUP
     #################################################################################
 
@@ -62,6 +80,8 @@ class Experiment():
         for anchor_id in anchor_ids:
             anchor_val = [anchor_ids[anchor_id][0], anchor_ids[anchor_id][1], anchor_ids[anchor_id][2], True]
             if int(anchor_id) in self.odom_data['id'].values:
+                if self.debug:
+                    print(f"Setting anchor {anchor_id} position to {anchor_val}")
                 self.odom_data.loc[self.odom_data['id'] == int(anchor_id), ['px', 'py', 'pz', 'Anchor']] = anchor_val
             else:
                 print(f"Warning: Anchor ID {anchor_id} not found in data.")
@@ -84,7 +104,7 @@ class Experiment():
                         # print(f"Range {i} to {j}: Mean = {mean_dist:.2f} m, Std = {std_dist:.2f} m, Samples = {len(data)}")
         return mean_matrix, std_matrix
 
-    def calibrate_anchor_pos(self):
+    def calibrate_anchor_pos(self, bounds=0, bounds_list =None, plot=False):
         def calculate_error(positions_flat, ordered_ids, mean_dis_matrix, std_dis_matrix):
             positions = positions_flat.reshape((len(ordered_ids), 3))
             dis_matrix = np.full((25, 25), np.nan)
@@ -100,9 +120,20 @@ class Experiment():
                         # print(f"Initial distance between {i} and {j}: {dist_ij:.2f} m")
             error_matrix = mean_dis_matrix - dis_matrix
             #mask error matrix if std_dis_matrix > 0.5:
-            error_matrix[std_dis_matrix > 0.05] = np.nan
+            error_matrix[std_dis_matrix > 0.1] = np.nan
             print(f"Current error: {np.nansum(np.abs(error_matrix))}")
             return np.nansum(np.abs(error_matrix))
+
+        def create_bounds(init_pos, bound):
+            bound_list = []
+            for pos in init_pos:
+                bound_list.append((pos[0]-bound, pos[0]+bound))
+                bound_list.append((pos[1]-bound, pos[1]+bound))
+                if pos[2] == 3:
+                    bound_list.append((3-bound,3+bound))
+                else:
+                    bound_list.append((pos[2]-bound, pos[2]+bound))
+            return bound_list
 
         mean_dis_matrix, std_dis_matrix = self.get_anchor_ranges_statistics()
         init_positions = self.odom_data[self.odom_data['Anchor'] == True][
@@ -113,16 +144,316 @@ class Experiment():
             if i in init_positions:
                 flattened_init_pos.extend([init_positions[i]['px'], init_positions[i]['py'], init_positions[i]['pz']])
                 ordered_ids.append(i)
+
         flattened_pos = np.array(flattened_init_pos)
+        if bounds_list is None:
+            bounds_list = create_bounds(np.array(flattened_init_pos).reshape((-1,3)), bounds)
         result = minimize(
             calculate_error,
             flattened_pos,
             args=(ordered_ids, mean_dis_matrix, std_dis_matrix),
-            method='L-BFGS-B', options={'disp': True}
+            method='L-BFGS-B', options={'disp': True},
+            bounds=bounds_list
         )
+        flatten_pos_3d = np.array(flattened_init_pos).reshape((-1,3))
+        new_pos_3d = result.x.reshape((-1,3))
         print(flattened_init_pos)
-        print(np.abs(flattened_pos - result.x).reshape((-1,3)))
+        print((flattened_pos - result.x).reshape((-1,3)))
 
+        print("[")
+        for i in new_pos_3d:
+            print(f"  [{i[0]:.3f}, {i[1]:.3f}, {i[2]:.3f}],")
+        print("]")
+        for i in ordered_ids:
+            #change the pos in self.odom_data for the anchor
+            idx = ordered_ids.index(i)
+            new_pos = [result.x[idx*3], result.x[idx*3+1], result.x[idx*3+2]]
+            self.odom_data.loc[self.odom_data['id'] == i, ['px', 'py', 'pz']] = new_pos
+        if plot:
+            ax_3d= plt.figure().add_subplot(projection='3d')
+            ax_3d.scatter(flatten_pos_3d[:,0], flatten_pos_3d[:,1], flatten_pos_3d[:,2], c='b')
+            ax_3d.scatter(new_pos_3d.reshape((-1,3))[:,0], new_pos_3d.reshape((-1,3))[:,1], new_pos_3d.reshape((-1,3))[:,2], c='r')
+            plt.show()
+
+    #################################################################################
+    ####  GROUND TRUTH TRAJECTORY
+    #################################################################################
+
+    def filter_ranges(self, sid, rid, time_horizon, max_std):
+        time_horizon= time_horizon*1e3 #convert to ms
+        data = self.range_data[(self.range_data['id'].isin([rid, sid]))
+                               & (self.range_data['rid'].isin([sid, rid]))]
+        if data.empty:
+            print(f"No range data between {sid} and {rid}")
+            return pd.DataFrame(columns=self.range_columns)
+        data = data.sort_values(by='time')
+        filtered_data = []
+        stds= []
+        distances = []
+        times = []
+        for i, row in data.iterrows():
+            times.append(row['time'])
+            distances.append(row['dist_m'])
+            std_dist = np.std(distances)
+            stds.append(std_dist)
+            if std_dist > max_std:
+                distances.pop(-1)
+                times.pop(-1)
+            elif len(distances ) >= int(time_horizon/1e3*10*0.9): # at least 90% of 10hz.
+                filtered_data.append(row)
+            while row['time'] - times[0] > time_horizon:
+                times.pop(0)
+                distances.pop(0)
+                if times == []:
+                    break
+            # t = row['time']
+            # window = data[(data['time'] >= t - time_horizon) & (data['time'] <= t + time_horizon)]
+            # if len(window) > int(time_horizon/1e3*10*0.9): # at least 90% of 10hz.
+            #     mean_dist = window['dist_m'].mean()
+            #     std_dist = window['dist_m'].std()
+            #     stds.append(std_dist)
+            #     if std_dist <= max_std:
+        return pd.DataFrame(filtered_data, columns=self.range_columns), data, stds
+
+    def calculate_gt_trajecotries(self, time_horizon=1, max_std=1.0):
+        tag_ids = self.odom_data[self.odom_data['Anchor'] == False]['id'].unique()
+        for sid in tag_ids:
+            if self.debug:
+                print(f"Calculating trajectory for tag {sid}")
+            self.calculate_gt_trajectory_of_tag(sid, time_horizon, max_std)
+
+    def calculate_gt_trajectory_of_tag(self, sid, time_horizon=1, max_std=1.0):
+        anchors_ids = self.odom_data[self.odom_data['Anchor'] == True]['id'].unique()
+        ranges_df = pd.DataFrame(columns=self.range_columns)
+        for rid in anchors_ids:
+            if rid != sid:
+                if self.debug:
+                    print(f"Calculating ranges between {sid} and {rid}")
+                range_data, original, stds = self.filter_ranges(sid, rid, time_horizon, max_std)
+                ranges_df = pd.concat([ranges_df, range_data], ignore_index=True)
+        # arrange by time
+        ranges_df = ranges_df.sort_values(by='time')
+        current_ranges = [np.array([idx, np.nan, np.nan, np.nan]) for idx in anchors_ids]
+        current_time = 0
+        for i, row in ranges_df.sort_values(by='time').iterrows():
+            if current_time != row['time']:
+                pos = self.calculate_position(current_ranges, current_time, sid)
+                if self.debug:
+                    print(f"Tag {sid} at time {current_time/1e3} s: Position = {pos}")
+                self.tag_gts = pd.concat([self.tag_gts, pd.DataFrame([[current_time, sid, pos[0], pos[1], pos[2]]], columns=self.tag_gts_columns)])
+                current_time = row['time']
+            idx  = row['rid']
+            if idx == sid:
+                idx = row['id']
+            # Find the index of the anchor in anchors_ids
+            range_index = list(anchors_ids).index(idx)
+            current_ranges[range_index] = np.array([int(idx), row['time'], row['dist_m'], row['fp_rssi']])
+
+            # self.odom_data.loc[(self.odom_data['id'] == sid) & (self.odom_data['time'] == row['time'])
+
+    def calculate_position(self, current_ranges, current_time, sid):
+        # form https://www.researchgate.net/publication/224222701_Static_positioning_using_UWB_range_measurements/link/0fcfd51071298bfea5000000/download
+        X = np.array([np.nan, np.nan, np.nan])
+        # get latest measurement form tag_gts
+        tag_gt = self.tag_gts[self.tag_gts['id'] == sid]
+        if not tag_gt.empty:
+            latest_gt = tag_gt[tag_gt['time'] <= current_time].sort_values(by='time').iloc[-1]
+            X = np.array([latest_gt['px'], latest_gt['py'], latest_gt['pz']])
+
+
+        usefull_ranges = []
+        for r in current_ranges:
+            if r[1] is not np.nan and r[1] > current_time - 1e3: # last second
+                usefull_ranges.append(r)
+        if len(usefull_ranges) >= 5:
+            # X = self.calculate_3D_NLS(usefull_ranges)
+            X = self.calculate_3D_NLS(usefull_ranges, initial_guess=X)
+            # X = np.linalg.solve(AtA, AtB)
+            if self.debug:
+                error = self.calculate_error_on_range(usefull_ranges, X)
+                print(f"Errors {error}")
+        return X
+
+    def calculate_3D_LS(self, usefull_ranges):
+        A = np.empty((0, 3))
+        b = np.empty((0,))
+        for i, row in enumerate(usefull_ranges):
+            xid = int(row[0])
+            if i == 0:
+                pos_0 = self.odom_data[(self.odom_data['id'] == xid) & (self.odom_data['Anchor'] == True)][
+                    ['px', 'py', 'pz']].iloc[0].to_numpy()
+                d0 = row[2]
+            else:
+                pos_i = self.odom_data[(self.odom_data['id'] == xid) & (self.odom_data['Anchor'] == True)][
+                        ['px', 'py', 'pz']].iloc[0].to_numpy()
+                di = row[2]
+                Arow = 2 * (pos_i - pos_0)
+                A = np.append(A, [Arow], axis=0)
+                b_row = d0 ** 2 - di ** 2 + pos_i[0] ** 2 - pos_0[0] ** 2 + pos_i[1] ** 2 - pos_0[1] ** 2 + pos_i[2] ** 2 - pos_0[2] ** 2
+                b = np.append(b, [b_row], axis=0)
+        pos, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+        return pos
+
+    def calculate_3D_NLS(self, usefull_ranges, initial_guess=None):
+        """
+        Estimate 3D tag position using nonlinear least squares multilateration.
+
+        Parameters:
+            anchors: list of (x, y, z) coordinates of anchors
+            distances: list of measured distances to the tag (same order as anchors)
+            initial_guess: optional initial estimate (x, y, z)
+            bounds: ((x_min, y_min, z_min), (x_max, y_max, z_max)) — optional
+                     to constrain the search (useful for known environment limits)
+
+        Returns:
+            (x, y, z): optimized estimated position of the tag
+        """
+        bounds = [(-1, -15, -1), (30, 15, 3)]
+        anchors = []
+        distances = []
+        for i, row in enumerate(usefull_ranges):
+            xid = int(row[0])
+            anchors.append(self.odom_data[(self.odom_data['id'] == xid) & (self.odom_data['Anchor'] == True)][
+                ['px', 'py', 'pz']].iloc[0].to_numpy())
+            distances.append(row[2])
+        anchors = np.array(anchors)
+        distances = np.array(distances)
+
+        # If no initial guess, use centroid of anchors
+        if np.any(np.isnan(initial_guess)):
+            initial_guess = np.mean(anchors, axis=0)
+
+        if bounds is not None:
+            lower, upper = np.array(bounds[0]), np.array(bounds[1])
+            initial_guess = np.clip(initial_guess, lower, upper)
+
+        def residuals(pos):
+            # Difference between measured and computed distances
+            return np.linalg.norm(anchors - pos, axis=1) - distances
+        # Solve nonlinear least squares
+        result = least_squares(
+            residuals,
+            x0=initial_guess,
+            bounds=bounds,
+            method='trf',  # Trust Region Reflective algorithm (good with bounds)
+            loss='soft_l1',  # robust to outliers
+            f_scale=0.5,
+            verbose= self.debug,
+        )
+        return tuple(result.x)
+
+    def calculate_error_on_range(self, usefull_ranges, pos):
+        error = []
+        for r in usefull_ranges:
+            if r[2] is not np.nan:
+                anchor_pos = self.odom_data[(self.odom_data['id'] == r[0]) & (self.odom_data['Anchor'] == True)][
+                    ['px', 'py', 'pz']].iloc[0].to_numpy()
+                dist = np.linalg.norm(pos - anchor_pos)
+                error.append(np.sqrt((dist-r[2])**2))
+        return error
+
+    def calculateSL1_ABMatrix(self, usefull_ranges):
+        # anchors_ids = self.odom_data[self.odom_data['Anchor'] == True]['id'].unique()
+        A = np.empty((0, 3))
+        B = np.empty((0,))
+        for i in range(len(usefull_ranges)):
+            id = usefull_ranges[i][0]
+            pose_1 = self.odom_data[(self.odom_data['id'] == id) & (self.odom_data['Anchor'] == True)][
+                ['px', 'py', 'pz']].iloc[0].to_numpy()
+            r_pose_1 = np.square(usefull_ranges[i][2] - np.linalg.norm(pose_1))
+            for j in range(len(usefull_ranges) - 1 - i):
+                id2 = usefull_ranges[len(usefull_ranges) - 1 - j][0]
+                pose_2 = self.odom_data[(self.odom_data['id'] == id2) & (self.odom_data['Anchor'] == True)][
+                    ['px', 'py', 'pz']].iloc[0].to_numpy()
+                Arow = 2 * (pose_1 - pose_2)
+                A = np.append(A, [Arow], axis=0)
+                r_pose_2 = np.square(usefull_ranges[len(usefull_ranges) - 1 - j][2] - np.linalg.norm(pose_2) )
+                diff = r_pose_1 - r_pose_2
+                B = np.append(B, [diff], axis=0)
+        AtA = np.matmul(np.transpose(A), A)
+        AtB = np.matmul(np.transpose(A), B)
+        X = np.linalg.solve(AtA, AtB)
+        return X
+
+    def smoothingfilter(self, window_size):
+        for id in self.tag_gts['id'].unique():
+            tag_data = self.tag_gts[self.tag_gts['id'] == id]
+            new_pos = []
+            for row in tag_data.itertuples():
+                t = row.time
+                window = tag_data[(tag_data['time'] >= t - window_size*1e3) & (tag_data['time'] <= t + window_size*1e3)]
+                pos = window[['px', 'py', 'pz']].mean()
+                new_pos.append([t, id, pos['px'], pos['py'], pos['pz']])
+            self.tag_gts = self.tag_gts[self.tag_gts['id'] != id]
+            self.tag_gts = pd.concat([self.tag_gts, pd.DataFrame(new_pos, columns=self.tag_gts_columns)], ignore_index=True)
+
+    #################################################################################
+    ####  VIO
+    #################################################################################
+
+    def set_vio_transformation(self,t, q,dt, id):
+        def normalize_quat(q):
+            q = np.asarray(q, dtype=float)
+            n = np.linalg.norm(q)
+            if n == 0:
+                return np.array([1.0, 0.0, 0.0, 0.0])
+            return q / n
+
+        def quat_mul(q, r):
+            # Quaternion multiply q * r, both as [w, x, y, z]
+            w0, x0, y0, z0 = q
+            w1, x1, y1, z1 = r
+            return np.array([
+                w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
+                w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
+                w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
+                w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1
+            ])
+
+        def quat_rotate(q, v):
+            # rotate vector(s) v by quaternion q. q = [w,x,y,z]. v shape (...,3)
+            q = normalize_quat(q)
+            v = np.asarray(v)
+            if v.ndim == 1:
+                v = v[None, :]
+                single = True
+            else:
+                single = False
+            # q * (0, v) * q_conj
+            qv = np.concatenate([np.zeros((v.shape[0], 1)), v], axis=1)  # (N,4)
+            q_conj = q * np.array([1.0, -1.0, -1.0, -1.0])
+            # left multiply: for many vectors convert quaternion to matrix for speed
+            # but we'll use quaternion multiplication per-vector for clarity:
+            out = []
+            for vec in v:
+                tmp = quat_mul(q, np.concatenate([[0.0], vec]))
+                rotated = quat_mul(tmp, q_conj)[1:]
+                out.append(rotated)
+            out = np.vstack(out)
+            return out[0] if single else out
+        vio_pos = self.vio_data[self.vio_data['id'] == id][["T_imu_wrt_vio_x(m)","T_imu_wrt_vio_y(m)","T_imu_wrt_vio_z(m)"]].to_numpy()
+        vio_pos_rot = quat_rotate(np.array(q), vio_pos)
+        vio_pos_fit = vio_pos_rot + np.array(t)
+        vio_time = self.vio_data[self.vio_data['id'] == id]['timestamp(ns)'].to_numpy() + dt*1e9
+        self.vio_data.loc[self.vio_data['id'] == id, 'timestamp(ns)'] = vio_time
+        # replace the pos in self.vio_data for id id
+        self.vio_data.loc[self.vio_data['id'] == id, ["T_imu_wrt_vio_x(m)","T_imu_wrt_vio_y(m)","T_imu_wrt_vio_z(m)"]] = vio_pos_fit
+
+    ###############################################################################
+    ####  ARP
+    ###############################################################################
+    def get_vio_transform(self, id):
+        vio_data = self.vio_data[self.vio_data['id'] == id]
+        time_data = vio_data['timestamp(ns)'].to_numpy()
+
+        velocity_data = vio_data[["vel_imu_wrt_vio_x(m/s)", "vel_imu_wrt_vio_y(m/s)", "vel_imu_wrt_vio_z(m/s)"]].to_numpy()
+        velocity_data = vio_data[["gravity_vector_x(m/s2)", "gravity_vector_y(m/s2)", "gravity_vector_z(m/s2)"]].to_numpy()
+        gyro_data = vio_data[["angular_vel_x(rad/s)", "angular_vel_y(rad/s)", "angular_vel_z(rad/s)"]].to_numpy()
+
+        return velocity_data, gyro_data, time_data
+
+    def get_imu_data(self, id):
+        pass
     #################################################################################
     ####  PLOTTING
     #################################################################################
@@ -131,7 +462,6 @@ class Experiment():
         max_id = max(unique_ids)+1
         if not separate_plots:
             axs = plt.subplots(max_id, max_id, figsize=(15, 15), sharex=True, sharey=True)[1]
-
         for id in range(25):
             for rid in range(id+1,25):
                 if id in unique_ids and rid in unique_ids:
@@ -139,9 +469,6 @@ class Experiment():
                         self.plot_range(id, rid)
                     else:
                         self.plot_range(id, rid, ax=axs[id, rid])
-
-
-
 
     def plot_range(self, id, rid, ax = None, plot_rssi = False):
         if ax is None:
@@ -163,11 +490,101 @@ class Experiment():
         # ax.legend()
 
 
+    def plot_filtered_range(self, id, rid, time_horizon=1, max_std=0.5):
+        try:
+            range_data, original, stds = self.filter_ranges(id, rid, time_horizon, max_std)
+            plt.figure()
+            plt.plot(stds)
+            plt.figure()
+            plt.plot(original['time'], original['dist_m'], 'r.')
+            plt.plot(range_data['time'], range_data['dist_m'], 'b.')
+            plt.twinx()
+            plt.plot(original['time'], original["rx_rssi"], 'g-')
+            plt.plot(original['time'], original["fp_rssi"], 'm-')
+            plt.title(f"Filtered ranges between {id} and {rid}")
+        except Exception as e:
+            print(f"Error plotting filtered range between {id} and {rid}: {e}")
 
-
+    def plot_filtered_ranges(self, time_horizon=1, max_std=1.0):
+        unique_ids = self.range_data['id'].unique()
+        cnt= 0
+        for id in range(25):
+            if id in unique_ids:
+                if self.odom_data[self.odom_data['id'] == id]['Anchor'].any():
+                    continue
+                for rid in range(0,25):
+                    if id is not rid and id in unique_ids and rid in unique_ids:
+                        cnt += 1
+                        self.plot_filtered_range(id, rid, time_horizon, max_std)
+                        if cnt >= 10:
+                            cnt = 0
+                            plt.show()
 
     def plot_3D(self):
-        pass
+        anchor_pose = self.odom_data[self.odom_data['Anchor'] == True][
+                ['id', 'px', 'py', 'pz']].drop_duplicates().set_index('id').to_numpy()
+        ax_3d = plt.figure().add_subplot(projection='3d')
+        ax_3d.scatter(anchor_pose[:,0], anchor_pose[:,1], anchor_pose[:,2], c='r', label='Anchors')
+        for id in self.tag_gts['id'].unique():
+            tag_data = self.tag_gts[self.tag_gts['id'] == id]
+            ax_3d.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label=f'Tag {id} GT')
+        for id in self.vio_data['id'].unique():
+            vio_tag_data = self.vio_data[self.vio_data['id'] == id]
+            ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+
+    def plot_vio_data(self, id):
+        if self.vio_data is None or self.vio_data.empty:
+            print("No VIO data loaded.")
+            return
+        vio_tag_data = self.vio_data[self.vio_data['id'] == id]
+        if vio_tag_data.empty:
+            print(f"No VIO data for tag {id}.")
+            return
+        fig = plt.figure()
+        ax_3d = fig.add_subplot(projection='3d')
+        ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+
+        plt.show()
+
+    ###############################################################################
+    ####  SAVING DATA
+    ###############################################################################
+    def save_gt(self, safe_folder):
+        for id in self.tag_gts['id'].unique():
+            tag_data = self.tag_gts[self.tag_gts['id'] == id]
+            tag_data.to_csv(f"./{safe_folder}/tag_{id}_gt.csv")
+            tag_data.to_pickle(f"./{safe_folder}/tag_{id}_gt.pkl")
+            print(f"Saved tag {id} GT to ./{safe_folder}/tag_{id}_gt")
+
+    def load_gt(self, safe_folder):
+        self.tag_gts = pd.DataFrame(columns=self.tag_gts_columns)
+        for file in os.listdir(safe_folder):
+            if file.startswith("tag_") and file.endswith("_gt.csv"):
+                id = int(file.split("_")[1])
+                tag_data = pd.read_csv(os.path.join(safe_folder, file))
+                self.tag_gts = pd.concat([self.tag_gts, tag_data], ignore_index=True)
+                print(f"Loaded tag {id} GT from {file}")
+
+    def load_vio_data(self, file_path, id):
+        data = pd.read_csv(file_path)
+        data['id'] = id
+        try :
+            self.vio_data = pd.concat([self.vio_data, data], ignore_index=True)
+        except AttributeError:
+            self.vio_data = data
+
+
+    def load_imu_data(self, file_path, id):
+        data = pd.read_csv(file_path)
+        data['id'] = id
+        try :
+            self.imu_data = pd.concat([self.imu_data, data], ignore_index=True)
+        except AttributeError:
+            self.imu_data = data
+
+    def save_range_data(self, file_path, rid, sid):
+        range_data, original, stds = self.filter_ranges(rid, sid, 0.1, 0.3)
+        range_data.to_csv(file_path+".csv", index=False)
 
 
 @deprecation.deprecated(details="Moved to PD dataframes in Experiment class")
@@ -194,3 +611,4 @@ class Device():
 
     def plot_distances(self, id = None):
         pass
+
