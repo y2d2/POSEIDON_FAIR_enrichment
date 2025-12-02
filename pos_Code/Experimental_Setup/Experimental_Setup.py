@@ -3,6 +3,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from pandas.errors import EmptyDataError
+
 from pos_Code.ESP_code.ESP_Class import ESP_wifi_module
 from scipy.optimize import minimize, least_squares
 
@@ -14,7 +16,7 @@ class Experiment():
         self.range_columns = ["time", "id", "rid", "dist_m", "fp_rssi", "rx_rssi"]
         self.odom_data = pd.DataFrame(columns=self.odom_columns)
         self.range_data = pd.DataFrame(columns=self.range_columns)
-        self.tag_gts_columns = ["time", "id", "px", "py", "pz"]
+        self.tag_gts_columns = ["time", "id", "px", "py", "pz", "cov_xx", "cov_xy", "cov_xz", "cov_yy", "cov_yz", "cov_zz"]
         self.tag_gts = pd.DataFrame(columns=self.tag_gts_columns)
         self.debug = debug
 
@@ -215,14 +217,28 @@ class Experiment():
             #     if std_dist <= max_std:
         return pd.DataFrame(filtered_data, columns=self.range_columns), data, stds
 
-    def calculate_gt_trajecotries(self, time_horizon=1, max_std=1.0):
+    def filter_all_ranges(self, id, time_horizon, max_std):
+        ids = self.range_data["id"].unique()
+        filtered_ranges = pd.DataFrame(columns=self.range_columns)
+        for rid in ids:
+            if rid != id:
+                range_data, _,_ = self.filter_ranges(id, rid, time_horizon, max_std)
+                filtered_ranges = pd.concat([filtered_ranges, range_data], ignore_index=True)
+        return filtered_ranges
+
+
+    def calculate_gt_trajecotries(self, time_horizon=1, max_std=1.0, fixed_z=None):
         tag_ids = self.odom_data[self.odom_data['Anchor'] == False]['id'].unique()
         for sid in tag_ids:
             if self.debug:
                 print(f"Calculating trajectory for tag {sid}")
-            self.calculate_gt_trajectory_of_tag(sid, time_horizon, max_std)
+            self.calculate_gt_trajectory_of_tag(sid, time_horizon, max_std,fixed_z )
 
-    def calculate_gt_trajectory_of_tag(self, sid, time_horizon=1, max_std=1.0):
+    def calculate_gt_trajectory_of_tag(self, sid, time_horizon=1, max_std=1.0, fixed_z=None, frequency=None):
+        eps = 0
+        if frequency is not None:
+            eps = 1e3 / frequency
+
         anchors_ids = self.odom_data[self.odom_data['Anchor'] == True]['id'].unique()
         ranges_df = pd.DataFrame(columns=self.range_columns)
         for rid in anchors_ids:
@@ -234,14 +250,16 @@ class Experiment():
         # arrange by time
         ranges_df = ranges_df.sort_values(by='time')
         current_ranges = [np.array([idx, np.nan, np.nan, np.nan]) for idx in anchors_ids]
-        current_time = 0
+        current_time = None
         for i, row in ranges_df.sort_values(by='time').iterrows():
-            if current_time != row['time']:
-                pos = self.calculate_position(current_ranges, current_time, sid)
+            if current_time is None:
+                current_time = row['time']
+            if current_time + eps < row['time']: # new time step every 100ms = 10hz
+                current_time = row['time']
+                pos, cov = self.calculate_position(current_ranges, current_time, sid, fixed_z)
                 if self.debug:
                     print(f"Tag {sid} at time {current_time/1e3} s: Position = {pos}")
-                self.tag_gts = pd.concat([self.tag_gts, pd.DataFrame([[current_time, sid, pos[0], pos[1], pos[2]]], columns=self.tag_gts_columns)])
-                current_time = row['time']
+                self.tag_gts = pd.concat([self.tag_gts, pd.DataFrame([[current_time, sid, pos[0], pos[1], pos[2], cov[0,0], cov[0,1], cov[0,2], cov[1,1],cov[1,2], cov[2,2]]], columns=self.tag_gts_columns)])
             idx  = row['rid']
             if idx == sid:
                 idx = row['id']
@@ -251,9 +269,10 @@ class Experiment():
 
             # self.odom_data.loc[(self.odom_data['id'] == sid) & (self.odom_data['time'] == row['time'])
 
-    def calculate_position(self, current_ranges, current_time, sid):
+    def calculate_position(self, current_ranges, current_time, sid, fixed_z=None):
         # form https://www.researchgate.net/publication/224222701_Static_positioning_using_UWB_range_measurements/link/0fcfd51071298bfea5000000/download
         X = np.array([np.nan, np.nan, np.nan])
+        cov = np.full((3,3), np.nan)
         # get latest measurement form tag_gts
         tag_gt = self.tag_gts[self.tag_gts['id'] == sid]
         if not tag_gt.empty:
@@ -266,13 +285,17 @@ class Experiment():
             if r[1] is not np.nan and r[1] > current_time - 1e3: # last second
                 usefull_ranges.append(r)
         if len(usefull_ranges) >= 5:
+            if fixed_z is not None:
+                X, cov = self.calculate_2D_NLS(usefull_ranges, initial_guess=X, fixed_z=fixed_z)
+
             # X = self.calculate_3D_NLS(usefull_ranges)
-            X = self.calculate_3D_NLS(usefull_ranges, initial_guess=X)
+            else:
+                X, cov = self.calculate_3D_NLS(usefull_ranges, initial_guess=X)
             # X = np.linalg.solve(AtA, AtB)
             if self.debug:
                 error = self.calculate_error_on_range(usefull_ranges, X)
                 print(f"Errors {error}")
-        return X
+        return X, cov
 
     def calculate_3D_LS(self, usefull_ranges):
         A = np.empty((0, 3))
@@ -294,6 +317,55 @@ class Experiment():
         pos, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
         return pos
 
+    def calculate_2D_NLS(self, usefull_ranges, initial_guess = None, fixed_z = 0):
+        bounds = [(-20, -20), (40, 40)]
+        anchors = []
+        distances = []
+        for i, row in enumerate(usefull_ranges):
+            xid = int(row[0])
+            anchors.append(self.odom_data[(self.odom_data['id'] == xid) & (self.odom_data['Anchor'] == True)][
+                               ['px', 'py', 'pz']].iloc[0].to_numpy())
+            distances.append(row[2])
+        anchors = np.array(anchors)
+        distances = np.array(distances)
+
+        # If no initial guess, use centroid of anchors
+        if np.any(np.isnan(initial_guess)):
+            initial_guess = np.mean(anchors, axis=0)
+        initial_guess = np.array([initial_guess[0], initial_guess[1]])
+
+        if bounds is not None:
+            lower, upper = np.array(bounds[0]), np.array(bounds[1])
+            initial_guess = np.clip(initial_guess, lower, upper)
+
+        def residuals(pos):
+            # Difference between measured and computed distances
+            aug_pos = np.array([pos[0], pos[1], fixed_z])
+            return np.linalg.norm(anchors - aug_pos, axis=1) - distances
+
+        # Solve nonlinear least squares
+        result = least_squares(
+            residuals,
+            x0=initial_guess,
+            bounds=bounds,
+            method='trf',  # Trust Region Reflective algorithm (good with bounds)
+            loss='soft_l1',  # robust to outliers
+            f_scale=0.5,
+            verbose=self.debug,
+        )
+        J = result.jac
+        JTJ = J.T @ J
+        if np.linalg.matrix_rank(JTJ) == 2:
+            sigma = np.std(result.fun)  # estimate from residuals
+            cov = sigma ** 2 * np.linalg.inv(JTJ)
+        else:
+            cov = np.full((2, 2), np.nan)  # singular
+        result.x = np.append(result.x, fixed_z)
+        #resape to have 3x3 with zeros for new elements
+        new_cov = np.full((3,3), 0.)
+        new_cov[0:2,0:2] = cov
+        return tuple(result.x), new_cov
+
     def calculate_3D_NLS(self, usefull_ranges, initial_guess=None):
         """
         Estimate 3D tag position using nonlinear least squares multilateration.
@@ -308,7 +380,8 @@ class Experiment():
         Returns:
             (x, y, z): optimized estimated position of the tag
         """
-        bounds = [(-1, -15, -1), (30, 15, 3)]
+        # bounds = [(-10, -15, -1), (30, 15, 3)]
+        bounds = None
         anchors = []
         distances = []
         for i, row in enumerate(usefull_ranges):
@@ -334,13 +407,20 @@ class Experiment():
         result = least_squares(
             residuals,
             x0=initial_guess,
-            bounds=bounds,
+            # bounds=bounds,
             method='trf',  # Trust Region Reflective algorithm (good with bounds)
             loss='soft_l1',  # robust to outliers
             f_scale=0.5,
             verbose= self.debug,
         )
-        return tuple(result.x)
+        J = result.jac
+        JTJ = J.T @ J
+        if np.linalg.matrix_rank(JTJ) == 3:
+            sigma = np.std(result.fun)  # estimate from residuals
+            cov = sigma ** 2 * np.linalg.inv(JTJ)
+        else:
+            cov = np.full((3, 3), np.nan)  # singular
+        return tuple(result.x), cov
 
     def calculate_error_on_range(self, usefull_ranges, pos):
         error = []
@@ -452,8 +532,255 @@ class Experiment():
 
         return velocity_data, gyro_data, time_data
 
+    def get_all_imu_data(self):
+        for id in self.odom_data['id'].unique():
+            self.get_imu_data(id)
+
     def get_imu_data(self, id):
-        pass
+        odom_data = self.odom_data[self.odom_data['id'] == id].sort_values(by='time')
+
+        print(id)
+
+    def get_orientation_from_gt(self):
+        for id in self.tag_gts['id'].unique():
+            pass
+
+
+
+    def stream_odom_from_gt(self, id, history=0.1, start_time = None, end_time =None, imu_bool = False):
+        def row_cov_matrix(row):
+            """Return 3x3 covariance matrix from a DataFrame row with cov_* columns."""
+            return np.array([
+                [row['cov_xx'], row['cov_xy'], row['cov_xz']],
+                [row['cov_xy'], row['cov_yy'], row['cov_yz']],
+                [row['cov_xz'], row['cov_yz'], row['cov_zz']]
+            ])
+        previous_imu_index = 0
+        previous_theta = np.nan
+        previous_theta_var = np.nan
+        odom_id_data = self.odom_data[self.odom_data['id'] == id].sort_values(by='time', ignore_index=True)
+
+        for row, window in self.stream_gt_data_id(id, history=history, start_time=start_time, end_time=end_time):
+            state_row = [1] * 8  # p, theta, v, w, vx
+            cov_matrix = np.ones((len(state_row), len(state_row)))
+            if imu_bool:
+                state_row = [1] * 14 # p, theta, v, w , vx, a , gyr
+                cov_matrix = np.ones((len(state_row), len(state_row)))
+            cov_matrix = cov_matrix*np.nan
+            state_row = np.array(state_row, dtype=float)*np.nan
+            first = window.iloc[0]
+            last = window.iloc[-1]
+            t= (last["time"] / 1e3) - (history / 2)
+            n = len(window)
+
+
+            Sigma_first = row_cov_matrix(first)
+            Sigma_last = row_cov_matrix(last)
+
+            # p and its covariance
+            p = np.mean(window[['px', 'py', 'pz']].to_numpy(), axis=0)
+            state_row[:3] = p.tolist()
+            sum_cov = np.zeros((3, 3))
+            sum_cov += row_cov_matrix(row)
+            p_cov =  sum_cov / n**2
+            cov_matrix[0:3, 0:3] = p_cov
+
+            # v and its covariance
+            dx = np.array([last['px'] - first['px'], last['py'] - first['py'], last['pz'] - first['pz']])
+            cov_dx = Sigma_last + Sigma_first
+            cov_p_dx = (1.0 / n) * (Sigma_last - Sigma_first)
+
+            v = dx * history
+            state_row[4:7] = v.tolist()
+            v_cov = (history**2) * cov_dx
+            cov_matrix [4:7, 4:7] = v_cov
+            cov_p_v = history * cov_p_dx
+            cov_matrix[0:3, 4:7] = cov_p_v
+            cov_matrix[4:7, 0:3] = cov_p_v
+
+            # TODO: IMPORTANT assumption that the drone and ARMS only moved forward, which was true in the experiments. But is not general.
+            r2 = dx[0] ** 2 + dx[1] ** 2
+            if r2 < 1e-1 or (np.isnan(r2)):
+                theta = np.nan
+                state_row[3] = theta
+                # degenerate — return large variance or handle specially
+                var_theta = np.nan
+                cov_theta_p = np.ones((1, 3))*np.nan
+                cov_theta_v = np.ones((1, 3))*np.nan
+            else:
+                theta= np.arctan2(dx[1], dx[0])
+                state_row[3] = theta
+                J_theta = np.array([- dx[1] / r2, dx[0] / r2])  # size (2,)
+                # extract 2x2 covariance of dx (x,y)
+                cov_dx_xy = cov_dx[:2, :2]
+                var_theta = float(J_theta @ cov_dx_xy @ J_theta.T)  # scalar
+
+                # covariance between theta and p:
+                # Cov([dx_x,dx_y], p) is first two rows of cov_p_dx transposed?
+                # cov_p_dx is Cov(p,dx) (3x3). We need Cov([dx_x,dx_y], p) which is the transpose of Cov(p,[dx_x,dx_y])
+                # So Cov([dx_x,dx_y], p) = cov_p_dx[:2, :].T
+                cov_dxxy_p = cov_p_dx[:2, :].T  # shape (3,2) ? careful: cov_p_dx is (3,3) = Cov(p,dx)
+                # We want Cov(theta, p) = J_theta * Cov([dx_x,dx_y], p)
+                # J_theta shape (2,), Cov([dx_x,dx_y], p) shape (2,3) -> result (3,) after multiplication
+                cov_theta_p = (J_theta @ cov_p_dx[:2, :])  # shape (3,)
+                # Cov(theta, v) similarly: Cov([dx_x,dx_y], v) = history * Cov([dx_x,dx_y], dx) = history * cov_dx[:2,:]
+                cov_theta_v = (J_theta @ (history * cov_dx[:2, :]))  # shape (3,)
+
+            cov_matrix[3, 3] = var_theta
+            cov_matrix[3, 0:3] = cov_theta_p
+            cov_matrix[0:3, 3] = cov_theta_p
+            cov_matrix[3, 4:7] = cov_theta_v
+            cov_matrix[4:7, 3] = cov_theta_v
+
+            if  not np.isnan(theta) and not np.isnan(previous_theta):
+                a0, a1 = previous_theta, theta
+                Dtheta = np.unwrap([a0, a1])[1] - np.unwrap([a0, a1])[0]
+                previous_theta = theta
+                previous_theta_var = var_theta
+            else:
+                Dtheta = np.nan
+            w =  Dtheta / history
+            state_row[7] = w
+
+            var_prev = 0.0 if previous_theta_var is None else previous_theta_var
+            # assume no covariance between prev and current if not tracked
+            var_Dtheta = var_theta + var_prev
+            var_wz = var_Dtheta / (history ** 2)
+
+            cov_w = np.zeros((3, 3))
+            cov_w[2, 2] = var_wz
+
+            # cross-covariances between w and p/v come from scaling of theta covariances by 1/history
+            cov_w_p = np.zeros((3, 3))
+            cov_w_v = np.zeros((3, 3))
+            if not np.isinf(var_theta):
+                # cov(w_z, p_j) = cov(Dtheta/history, p_j) ~= cov(theta, p_j)/history  (prev treated as independent)
+                cov_w_p[2, :] = cov_theta_p / history
+                cov_w_v[2, :] = cov_theta_v / history
+            cov_matrix[7, 0:3] = cov_w_p[2, :]
+            cov_matrix[7, 4:7] = cov_w_v[2, :]
+            cov_matrix[0:3, 7] = cov_w_p[2, :]
+            cov_matrix[4:7, 7] = cov_w_v[2, :]
+            cov_matrix[7,7] = var_wz
+
+            if self.debug:
+                print(f"Tag {id} at time {last['time']/1e3} s: Velocity = {v}, Angular Velocity = {w}")
+
+            if imu_bool:
+                # find clossest imu_data to t in self.imu_data for id:
+                closest_idx = (odom_id_data['time'] - t*1e3).abs().idxmin()
+
+                if previous_imu_index >= closest_idx:
+                    print(f"Warning: No IMU data close to time {t} for id {id}")
+                    state_row[8:14] = [np.nan]*6
+                    cov_matrix[8:14, 8:14]  = np.ones((6,6))*np.nan
+                else:
+                    imu_rows = odom_id_data.loc[previous_imu_index:closest_idx]
+                    a = np.mean(imu_rows[['ax', 'ay', 'az']].to_numpy()/100., axis=0)
+                    g = np.mean(imu_rows[['gx', 'gy', 'gz']].to_numpy()/100., axis=0)
+                    state_row[8:11] = a.tolist()
+                    state_row[11:14] = g.tolist()
+                    cov_matrix[8:14, 8:14] = np.eye(6)*len(imu_rows) # accelerometer noise
+                    try:
+                        previous_imu_index = closest_idx+1
+                    except TypeError:
+                        previous_imu_index = closest_idx
+
+            yield t,state_row, cov_matrix
+
+
+    def get_odom_from_gt(self, id , history=0.1, imu_bool = False, max_row = None):
+        states = []
+        cov_mats = []
+        ts = []
+        dt = history
+        i = 0
+        for t, state, cov_mat  in  self.stream_odom_from_gt(id, history=history, imu_bool=imu_bool):
+            states.append(state)
+            cov_mats.append(cov_mat)
+            ts.append(t)
+
+            if max_row is not None:
+                i += 1
+                if i >= max_row:
+                    break
+
+        return np.array(ts), np.array(states), np.array(cov_mats)
+
+
+
+    #################################################################################
+    ####  Streaming
+    #################################################################################
+    def stream_gt_data_id(self, id, history = 1, start_time = None, end_time = None):
+        tag_data = self.tag_gts[self.tag_gts['id'] == id].sort_values(by='time')
+        if start_time is not None:
+            tag_data = tag_data[tag_data['time'] >= start_time*1e3]
+        if end_time is not None:
+            tag_data = tag_data[tag_data['time'] <= end_time*1e3]
+        for i, row in tag_data.iterrows():
+            t = row['time']
+            window = tag_data[(tag_data['time'] >= t - history*1e3) & (tag_data['time'] <= t)]
+            yield row, window
+
+    def stream_data_id(self, id, history = 1):
+        gt_data = self.tag_gts[self.tag_gts['id'] == id].sort_values(by='time')
+        for i, row in gt_data.iterrows():
+            t = row['time']
+            window_gt = gt_data[(gt_data['time'] >= t - history*1e3) & (gt_data['time'] <= t)]
+            window_imu = self.odom_data[(self.odom_data['id'] == id) & (self.odom_data['time'] >= t - history*1e3) & (self.odom_data['time'] <= t)]
+            yield t, window_gt, window_imu
+
+    def stream_exp(self, freq = None,  history=1):
+        gt_data = self.tag_gts.sort_values(by='time')
+        odom_data = self.odom_data.sort_values(by='time')
+        t = 0
+        for i, row in gt_data.iterrows():
+            if freq is not None:
+                if row["time"]  <= t + 1e3/freq:
+                    continue
+            t = row['time']
+            window_gt = gt_data[(gt_data['time'] >= t - history*1e3) & (gt_data['time'] <= t)]
+            window_odom = odom_data[(odom_data['time'] >= t - history*1e3) & (odom_data['time'] <= t)]
+            yield t, window_gt, window_odom
+
+    def stream_range_data(self, id, start_time = None, end_time = None, range_data = None):
+        if range_data is None:
+            range_data = self.range_data
+        range_data = range_data[(range_data['id'] == id) | (range_data['rid'] == id)].sort_values(by='time')
+        if start_time is not None:
+            range_data = range_data[range_data['time'] >= start_time *1e3]
+        if end_time is not None:
+            range_data = range_data[range_data['time']  <= end_time*1e3]
+        for i, row in range_data.iterrows():
+            t = row['time']
+            sid = row['id']
+            rid = row['rid']
+            if sid == id:
+                other_id = rid
+            else:
+                other_id = sid
+            range = row['dist_m']
+            yield t/1e3, other_id, range, row['fp_rssi'], row['rx_rssi']
+
+    def stream_exp_id(self, id, history, start_time = None, end_time = None):
+        range_data = self.filter_all_ranges(id, time_horizon=0.1, max_std=0.1)
+        range_streamer = self.stream_range_data(id, start_time=start_time, end_time=end_time, range_data=range_data)
+        nan_distances = [np.nan] * int(np.max(range_data.id.unique()+1))
+        t_r = 0
+        for t, state_row, cov_mat in self.stream_odom_from_gt(id, history=history, start_time=start_time, end_time=end_time, imu_bool=True):
+            distances = nan_distances.copy()
+            while t_r < t:
+                t_r, other_id, range, fp_rssi, rx_rssi = next(range_streamer)
+                distances[int(other_id)] = range
+            data ={ "time": t*1e3, "ranges": distances,
+                    "state_row": state_row, "cov_mat": cov_mat}
+            yield data
+
+
+
+
+
     #################################################################################
     ####  PLOTTING
     #################################################################################
@@ -489,7 +816,6 @@ class Experiment():
         # ax.set_ylabel("Distance (m)")
         # ax.legend()
 
-
     def plot_filtered_range(self, id, rid, time_horizon=1, max_std=0.5):
         try:
             range_data, original, stds = self.filter_ranges(id, rid, time_horizon, max_std)
@@ -520,17 +846,37 @@ class Experiment():
                             cnt = 0
                             plt.show()
 
-    def plot_3D(self):
+    def plot_3D(self, name_dict= None):
         anchor_pose = self.odom_data[self.odom_data['Anchor'] == True][
                 ['id', 'px', 'py', 'pz']].drop_duplicates().set_index('id').to_numpy()
         ax_3d = plt.figure().add_subplot(projection='3d')
-        ax_3d.scatter(anchor_pose[:,0], anchor_pose[:,1], anchor_pose[:,2], c='r', label='Anchors')
+        ax_3d.scatter(anchor_pose[:,0], anchor_pose[:,1], anchor_pose[:,2], c='k', label='Anchors')
         for id in self.tag_gts['id'].unique():
             tag_data = self.tag_gts[self.tag_gts['id'] == id]
-            ax_3d.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label=f'Tag {id} GT')
-        for id in self.vio_data['id'].unique():
-            vio_tag_data = self.vio_data[self.vio_data['id'] == id]
-            ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+            label = f'Tag {id} GT'
+            if name_dict is not None and id in name_dict:
+                label = f'{label} - {name_dict[id]}'
+            ax_3d.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label=label)
+        # for id in self.vio_data['id'].unique():
+        #     vio_tag_data = self.vio_data[self.vio_data['id'] == id]
+        #     ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+
+    def plot_gt_cov(self,  id):
+        fig, ax = plt.subplots(3,2, figsize=(8,6), sharex=True)
+        tag_data = self.tag_gts[self.tag_gts['id'] == id]
+        # for i in range(3):
+        ax[0,0].plot(tag_data['time'], tag_data['px'])
+        ax[1,0].plot(tag_data['time'], tag_data['py'])
+        ax[2,0].plot(tag_data['time'], tag_data['pz'])
+        ax[0,1].plot(tag_data['time'], tag_data['cov_xx'])
+        ax[0,1].plot(tag_data['time'], tag_data['cov_xy'])
+        ax[0,1].plot(tag_data['time'], tag_data['cov_xz'])
+        ax[1,1].plot(tag_data['time'], tag_data['cov_yy'])
+        ax[1,1].plot(tag_data['time'], tag_data['cov_xy'])
+        ax[1,1].plot(tag_data['time'], tag_data['cov_yz'])
+        ax[2,1].plot(tag_data['time'], tag_data['cov_zz'])
+        ax[2,1].plot(tag_data['time'], tag_data['cov_xz'])
+        ax[2,1].plot(tag_data['time'], tag_data['cov_yz'])
 
     def plot_vio_data(self, id):
         if self.vio_data is None or self.vio_data.empty:
@@ -545,6 +891,64 @@ class Experiment():
         ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
 
         plt.show()
+
+    def plot_imu_data(self, id):
+        fig, axs = plt.subplots(3, 2, figsize=(10, 8), sharex=True)
+        for i in range(3):
+            imu_tag_data = self.odom_data[self.odom_data['id'] == id]
+            if imu_tag_data.empty:
+                print(f"No IMU data for tag {id}.")
+                return
+            axs[i, 0].plot(imu_tag_data['time'], imu_tag_data[['ax', 'ay', 'az']].to_numpy()[:, i], label=f'acc {["X","Y","Z"][i]}')
+            axs[i, 0].set_ylabel(f'acc {["X","Y","Z"][i]} (uT)')
+            axs[i, 0].legend()
+            axs[i, 1].plot(imu_tag_data['time'], imu_tag_data[['gx', 'gy', 'gz']].to_numpy()[:, i], label=f'Gyro {["X","Y","Z"][i]}')
+            axs[i, 1].set_ylabel(f'Gyro {["X","Y","Z"][i]} (rad/s)')
+            axs[i, 1].legend()
+
+    def stream_plot_data(self, freq = 1, history=1, name_dict= None, color_dict= None, plot_bool = True, save_folder = None):
+        fig = plt.figure()
+        tags_list = self.tag_gts['id'].unique()
+        labels={}
+        if name_dict is not None:
+            labels = name_dict
+        else:
+            for id in tags_list:
+                labels[id] = f'Tag {id} GT'
+
+        i = 0
+
+        for t, window_gt, window_odom in self.stream_exp(freq, history):
+
+            plt.clf()
+            plt.title(f"Time: {t/1e3:.2f} s")
+            anchor_pose = self.odom_data[self.odom_data['Anchor'] == True][
+                ['id', 'px', 'py', 'pz']].drop_duplicates().set_index('id').to_numpy()
+            plt.scatter(anchor_pose[:,0], anchor_pose[:,1], c='k',marker="x", label='Anchors')
+            for id in tags_list:
+                if id in window_gt['id'].unique():
+                    tag_data = window_gt[window_gt['id'] == id]
+                    if color_dict is not None:
+                        plt.plot(tag_data['px'], tag_data['py'], label=labels[id], color=color_dict[id])
+                    else:
+                        plt.plot(tag_data['px'], tag_data['py'], label=labels[id])
+
+            plt.legend(loc='lower right', ncol=2)
+            plt.xlim(-15, 35)
+            plt.ylim(-15, 35)
+            # for id in window_odom['id'].unique():
+            #     imu_tag_data = window_odom[window_odom['id'] == id]
+            #     ax_3d.plot(imu_tag_data['px'], imu_tag_data['py'], imu_tag_data['pz'], label=f'Tag {id} Odom', linestyle='--')
+            # ax_3d.set_title(f"Time: {t/1e3:.2f} s")
+            # ax_3d.legend()
+            if plot_bool:
+                plt.pause(0.1)
+            else:
+                print(t)
+            if save_folder is not None:
+                plt.savefig(f"./{save_folder}/{i}.png")
+            i+=1
+        # 2D plot of tag positions
 
     ###############################################################################
     ####  SAVING DATA
@@ -561,9 +965,24 @@ class Experiment():
         for file in os.listdir(safe_folder):
             if file.startswith("tag_") and file.endswith("_gt.csv"):
                 id = int(file.split("_")[1])
-                tag_data = pd.read_csv(os.path.join(safe_folder, file))
-                self.tag_gts = pd.concat([self.tag_gts, tag_data], ignore_index=True)
-                print(f"Loaded tag {id} GT from {file}")
+                try:
+                    tag_data = pd.read_csv(os.path.join(safe_folder, file))
+                    self.tag_gts = pd.concat([self.tag_gts, tag_data], ignore_index=True)
+                    print(f"Loaded tag {id} GT from {file}")
+                except EmptyDataError:
+                    print(f"No tag data loaded for tag {id}.")
+
+    def load_odom_data(self, save_folder):
+        self.odom_data = pd.DataFrame(columns=self.odom_columns)
+        for file in os.listdir(save_folder):
+            if file.startswith("tag_") and file.endswith("_imu.csv"):
+                id = int(file.split("_")[1])
+                try:
+                    odom_data = pd.read_csv(os.path.join(save_folder, file))
+                    self.odom_data = pd.concat([self.odom_data, odom_data], ignore_index=True)
+                    print(f"Loaded device {id} odom from {file}")
+                except EmptyDataError:
+                    print(f"No odom data loaded for device {id}.")
 
     def load_vio_data(self, file_path, id):
         data = pd.read_csv(file_path)
@@ -574,9 +993,12 @@ class Experiment():
             self.vio_data = data
 
 
-    def load_imu_data(self, file_path, id):
+    def load_imu_data(self, file_path, id, t_diff=0):
+        # TODO: the imu_data should not exist, it is already in the odom_data.
         data = pd.read_csv(file_path)
         data['id'] = id
+        data['time'] = data['timestamp(ns)']/1e6 + t_diff*1e3 # convert to ms and add time diff
+
         try :
             self.imu_data = pd.concat([self.imu_data, data], ignore_index=True)
         except AttributeError:
