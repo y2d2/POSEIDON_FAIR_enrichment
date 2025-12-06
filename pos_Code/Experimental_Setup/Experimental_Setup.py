@@ -463,7 +463,7 @@ class Experiment():
                 t = row.time
                 window = tag_data[(tag_data['time'] >= t - window_size*1e3) & (tag_data['time'] <= t + window_size*1e3)]
                 pos = window[['px', 'py', 'pz']].mean()
-                new_pos.append([t, id, pos['px'], pos['py'], pos['pz']])
+                new_pos.append([t, id, pos['px'], pos['py'], pos['pz'], np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
             self.tag_gts = self.tag_gts[self.tag_gts['id'] != id]
             self.tag_gts = pd.concat([self.tag_gts, pd.DataFrame(new_pos, columns=self.tag_gts_columns)], ignore_index=True)
 
@@ -581,7 +581,8 @@ class Experiment():
             p = np.mean(window[['px', 'py', 'pz']].to_numpy(), axis=0)
             state_row[:3] = p.tolist()
             sum_cov = np.zeros((3, 3))
-            sum_cov += row_cov_matrix(row)
+            for i_row, row_i in window.iterrows():
+                sum_cov += row_cov_matrix(row_i)
             p_cov =  sum_cov / n**2
             cov_matrix[0:3, 0:3] = p_cov
 
@@ -590,17 +591,17 @@ class Experiment():
             cov_dx = Sigma_last + Sigma_first
             cov_p_dx = (1.0 / n) * (Sigma_last - Sigma_first)
 
-            v = dx * history
+            v = dx / history
             state_row[4:7] = v.tolist()
-            v_cov = (history**2) * cov_dx
+            v_cov = (1/(history**2)) * cov_dx
             cov_matrix [4:7, 4:7] = v_cov
-            cov_p_v = history * cov_p_dx
+            cov_p_v = 1/history * cov_p_dx
             cov_matrix[0:3, 4:7] = cov_p_v
             cov_matrix[4:7, 0:3] = cov_p_v
 
             # TODO: IMPORTANT assumption that the drone and ARMS only moved forward, which was true in the experiments. But is not general.
             r2 = dx[0] ** 2 + dx[1] ** 2
-            if r2 < 1e-1 or (np.isnan(r2)):
+            if r2 < 1 or (np.isnan(r2)):
                 theta = np.nan
                 state_row[3] = theta
                 # degenerate — return large variance or handle specially
@@ -676,8 +677,8 @@ class Experiment():
                     cov_matrix[8:14, 8:14]  = np.ones((6,6))*np.nan
                 else:
                     imu_rows = odom_id_data.loc[previous_imu_index:closest_idx]
-                    a = np.mean(imu_rows[['ax', 'ay', 'az']].to_numpy()/100., axis=0)
-                    g = np.mean(imu_rows[['gx', 'gy', 'gz']].to_numpy()/100., axis=0)
+                    a = np.mean(imu_rows[['ax', 'ay', 'az']].to_numpy(), axis=0)
+                    g = np.mean(imu_rows[['gx', 'gy', 'gz']].to_numpy(), axis=0)
                     state_row[8:11] = a.tolist()
                     state_row[11:14] = g.tolist()
                     cov_matrix[8:14, 8:14] = np.eye(6)*len(imu_rows) # accelerometer noise
@@ -805,7 +806,10 @@ class Experiment():
         if data.empty:
             print(f"No range data between {id} and {rid}")
             return
-        ax.plot(data['time'], data['dist_m'], ".", label=f"Range {id} to {rid}")
+        ax.plot(data['time']*1e-3, data['dist_m'], ".", label=f"Range {id} to {rid}")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Distance (m)")
+        ax.set_title(f"Range to anchor {id}.")
         if plot_rssi:
             ax2 = ax.twinx()
             ax2.plot(data['time'], data['fp_rssi'], "r.", label=f"FP RSSI {id} to {rid}")
@@ -857,9 +861,12 @@ class Experiment():
             if name_dict is not None and id in name_dict:
                 label = f'{label} - {name_dict[id]}'
             ax_3d.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label=label)
-        # for id in self.vio_data['id'].unique():
-        #     vio_tag_data = self.vio_data[self.vio_data['id'] == id]
-        #     ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+        try:
+            for id in self.vio_data['id'].unique():
+                vio_tag_data = self.vio_data[self.vio_data['id'] == id]
+                ax_3d.plot(vio_tag_data['T_imu_wrt_vio_x(m)'], vio_tag_data['T_imu_wrt_vio_y(m)'], vio_tag_data['T_imu_wrt_vio_z(m)'], label=f'Tag {id} VIO', color='g')
+        except Exception as e:
+            print(f"Error plotting VIO data: {e}")
 
     def plot_gt_cov(self,  id):
         fig, ax = plt.subplots(3,2, figsize=(8,6), sharex=True)
@@ -905,6 +912,46 @@ class Experiment():
             axs[i, 1].plot(imu_tag_data['time'], imu_tag_data[['gx', 'gy', 'gz']].to_numpy()[:, i], label=f'Gyro {["X","Y","Z"][i]}')
             axs[i, 1].set_ylabel(f'Gyro {["X","Y","Z"][i]} (rad/s)')
             axs[i, 1].legend()
+
+    def stream_3D_plot_data(self, freq = 1, history=1, name_dict= None, color_dict= None, plot_bool = True, save_folder = None):
+        fig = plt.figure()
+        ax = fig.add_subplot(projection='3d')
+
+        tags_list = self.tag_gts['id'].unique()
+        i = 0
+
+        for t, window_gt, window_odom in self.stream_exp(freq, history):
+            ax.clear()
+            fig.suptitle(f"Time: {t/1e3:.2f} s")
+            anchor_pose = self.odom_data[self.odom_data['Anchor'] == True][
+                ['id', 'px', 'py', 'pz']].drop_duplicates().set_index('id').to_numpy()
+            ax.scatter(anchor_pose[:,0], anchor_pose[:,1], anchor_pose[:,2], c='k',marker="x", label='Anchors')
+            for id in tags_list:
+                if id in window_gt['id'].unique():
+                    tag_data = window_gt[window_gt['id'] == id]
+                    if color_dict is not None:
+                        ax.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label="Ground truth", color=color_dict[id])
+                    else:
+                        ax.plot(tag_data['px'], tag_data['py'], tag_data['pz'], label="Ground truth")
+
+            ax.legend(loc='upper right', ncol=2)
+            ax.view_init(elev=60, azim=180)
+            ax.set_xlim(-10,35)
+            ax.set_ylim(-15, 15)
+            ax.set_zlim(-1, 5)
+            # for id in window_odom['id'].unique():
+            #     imu_tag_data = window_odom[window_odom['id'] == id]
+            #     ax_3d.plot(imu_tag_data['px'], imu_tag_data['py'], imu_tag_data['pz'], label=f'Tag {id} Odom', linestyle='--')
+            # ax_3d.set_title(f"Time: {t/1e3:.2f} s")
+            # ax_3d.legend()
+            if plot_bool:
+                plt.pause(0.1)
+                # plt.show()
+            else:
+                print(t)
+            if save_folder is not None:
+                plt.savefig(f"./{save_folder}/{i}.png")
+            i+=1
 
     def stream_plot_data(self, freq = 1, history=1, name_dict= None, color_dict= None, plot_bool = True, save_folder = None):
         fig = plt.figure()
@@ -999,10 +1046,23 @@ class Experiment():
         data['id'] = id
         data['time'] = data['timestamp(ns)']/1e6 + t_diff*1e3 # convert to ms and add time diff
 
-        try :
-            self.imu_data = pd.concat([self.imu_data, data], ignore_index=True)
-        except AttributeError:
-            self.imu_data = data
+        odom_data = pd.DataFrame(columns=self.odom_columns)
+        odom_data['time'] = data['time']
+        odom_data['id'] = data['id']
+        odom_data['ax'] = data['AX(m/s2)']
+        odom_data['ay'] = data['AY(m/s2)']
+        odom_data['az'] = data['AZ(m/s2)']
+        odom_data['gy'] = data['GX(rad/s)']
+        odom_data['gx'] = data['GY(rad/s)']
+        odom_data['gz'] = data['GZ(rad/s)']
+
+        self.odom_data = pd.concat([self.odom_data[self.odom_data["id"]!=id], odom_data], ignore_index=True)
+
+
+        # try :
+        #     self.imu_data = pd.concat([self.imu_data, data], ignore_index=True)
+        # except AttributeError:
+        #     self.imu_data = data
 
     def save_range_data(self, file_path, rid, sid):
         range_data, original, stds = self.filter_ranges(rid, sid, 0.1, 0.3)

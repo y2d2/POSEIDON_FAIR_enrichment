@@ -14,7 +14,7 @@ def load_rough_aero_setup():
                        [8 - 3.3, 0.99, 2.9],
                        [8, 4.5 - 0.025, 1.65],
                        [8, -0.87, 3],
-                       [8 + 4.14, 1, 0.97, 2.9],
+                       [8 + 4.14, 0.97, 2.9],
                        [8 + 4.14, 4.5 - 1.3, 2.9],
                        [16, 4.5 - 0.025, 0.36],
                        [16, 4.5 - 0.89, 3],
@@ -48,6 +48,24 @@ def load_cal_aero_setup(folder_path= "../ESP_code/data/Long Experiment noon", de
                       [15.796, 1.103, 2.700],
                       [7.977, -8.877, 1.950],
                       [7.948, 13.200, 2.100], ]
+    call_positions = [
+        [0.271, 3.582, 2.897],
+        [0.212, 4.286, 0.190],
+        [0.233, 1.079, 3.192],
+        [0.193, 0.257, 0.468],
+        [31.731, 3.102, 2.815],
+        [4.857, 1.035, 2.761],
+        [8.036, 4.377, 1.685],
+        [8.082, -0.570, 2.953],
+        [12.025, 1.182, 2.751],
+        [12.134, 3.014, 2.870],
+        [15.828, 4.291, 0.511],
+        [16, 4.5 - 0.89, 3],# 11 not present in large data set.
+        [15.947, -0.036, 0.148],
+        [15.847, 1.097, 2.883],
+        [7.956, -8.876, 2.105],
+        [7.902, 13.200, 2.092],
+    ]
     anchors_ids = {f"{i}": call_positions[i] for i in range(16)}
     exp_setup = Experimental_Setup.Experiment(debug)
     # folder_path = "../ESP_code/data/small_extract"
@@ -92,6 +110,16 @@ def load_AA_cal_setup(debug=False, folder_path= "../ESP_code/data/AA_monday"):
         [26.000, 18.304, 1.263],
         [25.498, 24.090, 1.354],
     ]
+    # cal_positions = [
+    #     [12.037, 8.609,  1.326],
+    #     [ 3.600, 0.000, 1.869],
+    #     [23.873, 3.286,  1.395],
+    #     [12.300, 13.692,  1.424],
+    #     [7.523, 8.202,  1.250],
+    #     [23.863, 13.586,  1.400],
+    #     [18.304, 26.000,  1.263],
+    #     [24.090, 25.498,  1.354],
+    # ]
     anchors_ids = {f"{i}": cal_positions[i] for i in range(len(cal_positions))}
     exp_setup = Experimental_Setup.Experiment(debug)
     if folder_path is not None:
@@ -172,8 +200,8 @@ class MyTestCase(unittest.TestCase):
         plt.figure()
         plt.plot(stds)
         plt.figure()
-        plt.plot(original['time'], original['dist_m'], 'r.')
-        plt.plot(range_data['time'], range_data['dist_m'], 'b.')
+        plt.plot(original['time'], original['dist_m'], 'b.')
+        # plt.plot(range_data['time'], range_data['dist_m'], 'b.')
         plt.show()
 
     def test_plot_filtered_ranges(self):
@@ -220,7 +248,7 @@ class MyTestCase(unittest.TestCase):
         #                               & (exp_setup.imu_data['time'] >= t[0]*1e3)
         #                               &  (exp_setup.imu_data['time'] <= t[-1]*1e3)]
 
-        fig, ax = plt.subplots(4,4)
+        fig, ax = plt.subplots(4,4, sharex=True)
         ax[0,0].plot(t, state[:,0])
         ax[1,0].plot(t, state[:,1])
         ax[2,0].plot(t, state[:,2])
@@ -304,13 +332,14 @@ class MyTestCase(unittest.TestCase):
         dt = 20.433 #s
         delta_t = gt_time_0 - vio_time_0 + dt
         exp_setup,_ = load_cal_aero_setup()
-        load_path = "../ESP_code/data/Aerolytics_small_extract_GT"
+        load_path = "../ESP_code/data/Aerolytics_Long_GT_2"
         exp_setup.load_gt(load_path)
-        exp_setup.smoothingfilter(window_size=0.5)
+        # exp_setup.smoothingfilter(window_size=0.5)
         exp_setup.load_vio_data("../ESP_code/data/Long Experiment noon VIO/data.csv", 16)
-        exp_setup.plot_3D()
+        # exp_setup.plot_3D()
         exp_setup.set_vio_transformation( t, q, delta_t, 16)
         exp_setup.plot_3D()
+        plt.legend()
         plt.show()
 
     def test_get_vio_transform(self):
@@ -321,9 +350,9 @@ class MyTestCase(unittest.TestCase):
         dt = 20.433 #s
         delta_t = gt_time_0 - vio_time_0 + dt
         exp_setup,_ = load_cal_aero_setup()
-        load_path = "../ESP_code/data/Aerolytics_small_extract_GT"
+        load_path = "../ESP_code/data/Aerolytics_Long_GT_2"
         exp_setup.load_gt(load_path)
-        exp_setup.smoothingfilter(window_size=0.5)
+        # exp_setup.smoothingfilter(window_size=0.5)
         exp_setup.load_vio_data("../ESP_code/data/Long Experiment noon VIO/data.csv", 16)
         exp_setup.set_vio_transformation(t, q, delta_t, 16)
         vio_t, vio_q, tim = exp_setup.get_vio_transform(16)
@@ -342,7 +371,7 @@ class MyTestCase(unittest.TestCase):
     ##################################################################################
     def test_plot_range(self):
         exp_setup = load_rough_aero_setup()
-        exp_setup.plot_range(6, 16, plot_rssi=False)
+        exp_setup.plot_range(15, 16, plot_rssi=False)
         plt.show()
 
     def test_plot_ranges(self):
@@ -364,7 +393,7 @@ class MyTestCase(unittest.TestCase):
 
     def test_plot_aero_gt(self):
         exp_setup, cal_loc = load_cal_aero_setup(debug=True,folder_path=None)
-        exp_setup.load_gt("../ESP_code/data/Aerolytics_Long_GT_2")
+        exp_setup.load_gt("../ESP_code/data/Aerolytics_Long_GT_3")
         exp_setup.set_anchors(cal_loc)
         exp_setup.plot_3D()
         exp_setup.plot_gt_cov(16)
@@ -375,7 +404,7 @@ class MyTestCase(unittest.TestCase):
     def test_save_data_aerolytics(self):
         exp_setup, _ = load_cal_aero_setup(debug=True, folder_path="../ESP_code/data/Long Experiment noon")
         exp_setup.calculate_gt_trajectory_of_tag(16, time_horizon=0.1, max_std=0.1)
-        save_path = "../ESP_code/data/Aerolytics_Long_GT_2"
+        save_path = "../ESP_code/data/Aerolytics_Long_GT_3"
         exp_setup.save_gt(save_path)
         exp_setup.plot_3D()
         plt.show()
@@ -383,7 +412,7 @@ class MyTestCase(unittest.TestCase):
     def test_save_data_AA(self):
         print("Starting AA GT saving test...")
         exp_setup, _ = load_AA_cal_setup(debug=True)
-        safe_folder = "../ESP_code/data/AA_monday_GT_2_cov"
+        safe_folder = "../ESP_code/data/AA_monday_GT_3_cov"
         tag_ids = exp_setup.odom_data[exp_setup.odom_data['Anchor'] == False]['id'].unique()
         for sid in tag_ids:
             save_file = f"{safe_folder}/tag_{sid}_gt.csv"
@@ -454,7 +483,7 @@ class MyTestCase(unittest.TestCase):
         load_path = "../ESP_code/data/AA_monday_GT_2"
         exp_setup.load_gt(load_path)
         # exp_setup.load_odom_data("../ESP_code/data/AA_monday_IMU")
-        name_dict= {19: 6344, 18:7076, 17 : 6192,
+        name_dict= {19: 6344, 18:7076, 17 : 7075,
                      16 :6169 , 15: 6192,13:6179,
                     12: 6167, 11: 6168, 10: 6369,
                     9: 6164, 8: 6184}
@@ -478,6 +507,14 @@ class MyTestCase(unittest.TestCase):
         save_folder = "../ESP_code/data/AA_monday_GT_2_stream_plots"
         exp_setup.stream_plot_data(history=10, name_dict = name_dict, color_dict=color_dict, save_folder=save_folder, plot_bool=False)
 
+    def test_stream_plot_Aerolytics(self):
+        exp_setup,_ = load_cal_aero_setup(debug=True, folder_path="../ESP_code/data/Long Experiment noon")
+        load_path = "../ESP_code/data/Aerolytics_Long_GT_3"
+        exp_setup.load_gt(load_path)
+        save_folder = "../ESP_code/data/Aerolytics_stream_plots_3"
+        exp_setup.stream_3D_plot_data(freq = 10, history=10, save_folder=save_folder, plot_bool=False)
+
+
     def test_create_movie(self):
         # folder = "../ESP_code/data/AA_monday_GT_2_stream_plots"
         import moviepy.video.io.ImageSequenceClip
@@ -497,18 +534,37 @@ class MyTestCase(unittest.TestCase):
         clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip(image_files, fps=fps)
         clip.write_videofile('my_video_100fps.mp4')
 
+    def test_create_Aerolytics_movie(self):
+        import moviepy.video.io.ImageSequenceClip
+        image_folder = "../ESP_code/data/Aerolytics_stream_plots"
+        fps = 10
+        start = 0
+        end = 501
+        # image_files = [os.path.join(image_folder, img)
+        #                for img in os.listdir(image_folder)
+        #                if img.endswith(".png")]
+        image_files = []
+        for i in range(start, end + 1):
+            image_file = os.path.join(image_folder,str(i) + ".png")
+            if os.path.exists(image_file):
+                print(image_file)
+                image_files.append(image_file)
+        clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip(image_files, fps=fps)
+        clip.write_videofile('Aero.mp4')
+
+
     def test_stream_exp_id(self):
-        exp_setup, _ = load_cal_aero_setup(debug=True)
-        exp_setup.load_gt("../ESP_code/data/Aerolytics_Long_GT_2")
-        # exp_setup.set_anchors(cal_loc)
-        # filepath = "../ESP_code/data/Long Experiment noon VIO/data_imu.csv"
-        # gt_time_0 = 2627.448  # s
-        # vio_time_0 = 364.598  # s
-        # dt = 20.433  # s
-        # delta_t = gt_time_0 - vio_time_0 + dt
-        # exp_setup.load_imu_data(filepath, 16, t_diff=delta_t)
+        exp_setup, cal_loc = load_cal_aero_setup(debug=True)
+        exp_setup.load_gt("../ESP_code/data/Aerolytics_Long_GT_3")
+        exp_setup.set_anchors(cal_loc)
+        filepath = "../ESP_code/data/Long Experiment noon VIO/data_imu.csv"
+        gt_time_0 = 2627.448  # s
+        vio_time_0 = 364.598  # s
+        dt = 20.433  # s
+        delta_t = gt_time_0 - vio_time_0 + dt
+        exp_setup.load_imu_data(filepath, 16, t_diff=delta_t)
         flats = []
-        for data in exp_setup.stream_exp_id(16, history=1.0, start_time = None, end_time =None):
+        for data in exp_setup.stream_exp_id(16, history=1, start_time = None, end_time =None):
             flat = {}
             flat["time"] = data["time"]
             for i in range(len(data["ranges"])):
@@ -520,11 +576,11 @@ class MyTestCase(unittest.TestCase):
             print(flat)
             flats.append(flat)
         df = pd.DataFrame(flats)
-        df.to_csv("full_exp.csv")
+        df.to_csv("Aero_full_exp.csv")
         print(df)
 
     def test_stream_AA_exp_id(self):
-        name_dict = {19: 6344, 18: 7076, 17: 6192,
+        name_dict = {19: 6344, 18: 7076, 17: 7075,
                      16: 6169, 15: 6192, 13: 6179,
                      12: 6167, 11: 6168, 10: 6369,
                      9: 6164, 8: 6184}
@@ -542,7 +598,7 @@ class MyTestCase(unittest.TestCase):
             # delta_t = gt_time_0 - vio_time_0 + dt
             # exp_setup.load_imu_data(filepath, 16, t_diff=delta_t)
             flats = []
-            for data in exp_setup.stream_exp_id(id, history=1.0, start_time = None, end_time =None):
+            for data in exp_setup.stream_exp_id(id, history=1.0, start_time = None, end_time =2000):
                 flat = {}
                 flat["time"] = data["time"]
                 for i in range(len(data["ranges"])):
