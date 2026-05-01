@@ -4,6 +4,7 @@ import pos_Code.Experimental_Setup.Experimental_Setup as Experimental_Setup
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 def load_rough_aero_setup():
     rough_positions = [[0, 4.5 - 0.86, 3],
@@ -127,6 +128,11 @@ def load_AA_cal_setup(debug=False, folder_path= "../ESP_code/data/AA_monday"):
         exp_setup.set_anchors(anchors_ids)
     return exp_setup, anchors_ids
 
+def load_goayuan_exp(debug=False, folder_path= "../ESP_code/data/udp_data_2026-01-21_14-17-37_Goayuan"):
+    exp_setup = Experimental_Setup.Experiment(debug)
+    if folder_path is not None:
+        exp_setup.load_data(folder_path)
+    return exp_setup
 
 class MyTestCase(unittest.TestCase):
 
@@ -321,6 +327,71 @@ class MyTestCase(unittest.TestCase):
 
         plt.show()
 
+    #Gaoyuan IMU data
+    def test_load_imu_data_gaoyuan(self):
+        exp_setup = load_goayuan_exp(debug=True, folder_path="../ESP_code/data/udp_data_2026-01-21_14-17-37_Goayuan")
+        exp_setup.get_all_imu_data()
+
+        safe_folder = "../ESP_code/data/Gaoyuan_IMU"
+        tag_ids = exp_setup.odom_data[exp_setup.odom_data['Anchor'] == False]['id'].unique()
+        for sid in tag_ids:
+            save_file = f"{safe_folder}/tag_{sid}_imu.csv"
+            if os.path.exists(save_file):
+                print("imu data already saved, skipping...")
+            else:
+            # Creates an empty CSV file at the specified path
+                with open(save_file, 'w') as f:
+                    pass
+                if exp_setup.debug:
+                    print(f"Calculating trajectory for tag {sid}")
+                imu_data = exp_setup.odom_data[exp_setup.odom_data['id'] == sid]
+                imu_data.to_csv(save_file)
+                imu_data.to_pickle(f"{safe_folder}/tag_{sid}_imu.pkl")
+                print(f"Saved tag {sid} Imu to {save_file}")
+            exp_setup.plot_imu_data(sid)
+
+        plt.show()
+
+    def test_imu_process_Gaoyuan(self):
+        imu_data = pd.read_pickle(open("../ESP_code/data/Gaoyuan_IMU/tag_7_imu.pkl", "rb"))
+        # add column for diff in time between rows:
+        imu_data['time_diff'] = imu_data['time'].diff().fillna(0)
+        #plot the gx vs time using seaborn:
+        # sns.lineplot(data=imu_data, x='time', y='gx')
+        # sns.lineplot(data=imu_data, x='time', y='gy')
+        # sns.lineplot(data=imu_data, x='time', y='gz')
+        # plt.show()
+        imu_cal = imu_data[(imu_data['time'] >= 3.2e6) & (imu_data['time'] <= 3.5e6)]
+        imu_data_sam = imu_data[(imu_data['time'] >= 3.5e6) & (imu_data['time'] <= 4.2e6)]
+
+        bias = imu_cal[['gx', 'gy', 'gz']].mean()
+        imu_noise = imu_cal[['gx', 'gy', 'gz']].std()
+
+        print(f"Bias: {bias}")
+        print(f"Noise std: {imu_noise}")
+
+        imu_data_sam['gx_cal'] = imu_data_sam['gx'] - bias['gx']
+        imu_data_sam['gy_cal'] = imu_data_sam['gy'] - bias['gy']
+        imu_data_sam['gz_cal'] = imu_data_sam['gz'] - bias['gz']
+
+        imu_data_sam["gx_cal_smooth"] = imu_data_sam['gx_cal'].rolling(window=100, center=True).mean()
+        imu_data_sam["gy_cal_smooth"] = imu_data_sam['gy_cal'].rolling(window=100, center=True).mean()
+        imu_data_sam["gz_cal_smooth"] = imu_data_sam['gz_cal'].rolling(window=100, center=True).mean()
+
+        imu_data_sam["angle_x"] = (imu_data_sam['gx_cal'] * imu_data_sam['time_diff']*1e-6).cumsum()
+        imu_data_sam["angle_y"] = (imu_data_sam['gy_cal'] * imu_data_sam['time_diff']*1e-6).cumsum()
+        imu_data_sam["angle_z"] = (imu_data_sam['gz_cal'] * imu_data_sam['time_diff']*1e-6).cumsum()
+        imu_data_sam["angle_total"] = np.sqrt(imu_data_sam["angle_x"]**2 + imu_data_sam["angle_y"]**2 + imu_data_sam["angle_z"]**2)
+        sns.lineplot(data=imu_data_sam, x='time', y='angle_x', label='angle_x')
+        sns.lineplot(data=imu_data_sam, x='time', y='angle_y', label='angle_y')
+        sns.lineplot(data=imu_data_sam, x='time', y='angle_z', label='angle_z')
+        sns.lineplot(data=imu_data_sam, x='time', y='angle_total', label='angle_total')
+        imu_data_sam.to_csv("../ESP_code/data/Gaoyuan_IMU/tag_7_imu_processed.csv")
+
+        plt.legend()
+        plt.show()
+        print("test")
+
     ##################################################################################
     #### VIO
     ##################################################################################
@@ -376,7 +447,7 @@ class MyTestCase(unittest.TestCase):
 
     def test_plot_ranges(self):
         exp_setup,_= load_AA_cal_setup(debug=True)
-        exp_setup.plot_ranges(separate_plots=True)
+        exp_setup.plot_range(8, 0, plot_rssi=False)
         plt.show()
 
     def test_3D_plot(self):

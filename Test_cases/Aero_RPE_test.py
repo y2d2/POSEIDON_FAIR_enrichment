@@ -272,7 +272,7 @@ class MyTestCase(unittest.TestCase):
             [7.902, 13.200, 2.092],
         ]
         anchors_ids = {f"{i}": call_positions[i] for i in range(16)}
-        data_frame = load_experiment_data('./Data/Aero_full_exp_h_01.csv')
+        data_frame = load_experiment_data('./Data/Aero_full_exp.csv')
         states = []
         cov_mats = []
         times = []
@@ -312,7 +312,7 @@ class MyTestCase(unittest.TestCase):
         ax[2, 0].plot(times, states[:, 2], label="z")
         ax[0, 0].set_ylabel("X Position (m)")
         ax[1, 0].set_ylabel("Y Position (m)")
-        ax[2, 0].set_ylabel("Y Position (m)")
+        ax[2, 0].set_ylabel("Z Position (m)")
         ax[3, 0].plot(times, states[:, 3], label="H")
         ax[3, 0].set_ylabel("Heading (rad)")
 
@@ -351,8 +351,9 @@ class MyTestCase(unittest.TestCase):
         plt.show()
 
     def test_load_Aero_results(self):
-        i = -1
-        for anchor_id in range(16):
+        i = 100
+        for anchor_id in range(1):
+            anchor_id = 6
             try:
                 results_folder = f"./Results/test/Aero_test_exp_test2_{anchor_id}"
                 for file in os.listdir(results_folder):
@@ -362,7 +363,7 @@ class MyTestCase(unittest.TestCase):
                         fig = plt.figure()
                         ax = fig.add_subplot(111, projection='3d')
                         best_particle_log = data_logger.find_particle_log(data_logger.upf_connected_agent.best_particle).rpea_datalogger
-                        best_particle_log.plot_ca_corrected_estimated_trajectory(ax, color = "gold", label="Active relative pose estimation")
+                        best_particle_log.plot_ca_corrected_estimated_trajectory(ax, color = "gold", label="Active relative pose estimation",i=i)
                         data_logger.connected_agent.set_plotting_settings(color="k")
                         data_logger.connected_agent.plot_real_position(ax, annotation=f"Ground truth", alpha=1., i=i, history=None)
                         data_logger.host_agent.set_plotting_settings(color="darkgreen")
@@ -377,8 +378,72 @@ class MyTestCase(unittest.TestCase):
                 print(f"Error loading results for anchor ID {anchor_id}: {e}")
         plt.show()
 
+    def test_create_movie_from_results(self):
+        anchor_id = 4
+        try:
+            movie_folder = f"./Results/movies/Aero_test_exp_test2_{anchor_id}/movie_frames"
+            if os.path.exists(movie_folder):
+                for file in os.listdir(movie_folder):
+                    os.remove(os.path.join(movie_folder, file))
+            else:
+                os.makedirs(movie_folder, exist_ok=True)
+            results_folder = f"./Results/test/Aero_test_exp_test2_{anchor_id}"
+            for file in os.listdir(results_folder):
+                if file.endswith(".pkl"):
+                    print(f"Loading file: {file}")
+                    data_logger: UPFConnectedAgentDataLogger = pkl.load(open(results_folder + "/" + file, "rb"))
+                    fig = plt.figure()
+                    ax = fig.add_subplot(111, projection='3d')
+                    plt.ion()
+                    plt.show()
+                    for i in range(data_logger.i):
+                        if i % 10 != 0:
+                            continue
+                        ax.cla()
+                        best_particle_log = data_logger.find_particle_log(
+                            data_logger.upf_connected_agent.best_particle).rpea_datalogger
+                        best_particle_log.plot_ca_corrected_estimated_trajectory(ax, color="gold",
+                                                                                 label="Active relative pose estimation",
+                                                                                 i=i)
+                        data_logger.connected_agent.set_plotting_settings(color="k")
+                        data_logger.connected_agent.plot_real_position(ax, annotation=f"Ground truth", alpha=1., i=i,
+                                                                       history=None)
+                        data_logger.host_agent.set_plotting_settings(color="darkgreen")
+                        data_logger.host_agent.plot_real_position(ax, annotation=f"Anchor", i=i, history=None)
+                        data_logger.connected_agent.plot_slam_position(ax, color="tab:blue", annotation="SLAM position",
+                                                                       linestyle="-", alpha=1, i=i)
+                        fig.suptitle(f"Experiment results for anchor ID {anchor_id}")
+                        # plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                        ax.view_init(elev=60, azim=120)
+                        plt.savefig(f"{movie_folder}/frame_{i:05d}.png")
+                        plt.pause(0.1)
 
+                    # data_logger.plot_self(title=f" Anchor ID: {anchor_id}")
+        except Exception as e:
+            print(f"Error loading results for anchor ID {anchor_id}: {e}")
         # tas = create_experiment(results_folder, sig_v=0.08, sig_w=0.08, sig_uwb=0.25)
         # tas.load_results("./Results/test/")
+
+    def test_make_movie(self):
+        import moviepy.video.io.ImageSequenceClip
+        anchor_id = 15
+        image_folder = f"./Results/movies/Aero_test_exp_test2_{anchor_id}/movie_frames"
+        fps = 10
+        start = 0
+        end = 1620
+        # image_files = [os.path.join(image_folder, img)
+        #                for img in os.listdir(image_folder)
+        #                if img.endswith(".png")]
+        image_files = []
+        for i in range(start, end + 1):
+            image_name = f"frame_{i:05d}.png"
+            image_file = os.path.join(image_folder, image_name)
+            if os.path.exists(image_file):
+                print(image_file)
+                image_files.append(image_file)
+        clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip(image_files, fps=fps)
+        clip.write_videofile(f"Anchor_{anchor_id}.mp4")
+
+
 if __name__ == '__main__':
     unittest.main()

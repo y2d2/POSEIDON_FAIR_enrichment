@@ -367,7 +367,81 @@ class MyTestCase(unittest.TestCase):
                 print(f"Error loading results for anchor ID {anchor_id}: {e}")
         plt.show()
 
+    def test_create_movie_from_results(self):
+        tag_id = 8
+        name_dict = {19: 6344, 18: 7076, 17: 7075,
+                     16: 6169, 15: 6192, 13: 6179,
+                     12: 6167, 11: 6168, 10: 6369,
+                     9: 6164, 8: 6184}
+        for anchor_id in range(8):
 
+
+            results_folder = f"./Results/test_AA/AA_test_exp_{tag_id}_{anchor_id}"
+
+            try:
+                movie_folder = f"./Movies/AA_test_exp_{tag_id}_{anchor_id}/movie_frames"
+                if os.path.exists(movie_folder):
+                    for file in os.listdir(movie_folder):
+                        os.remove(os.path.join(movie_folder, file))
+                else:
+                    os.makedirs(movie_folder, exist_ok=True)
+                for file in os.listdir(results_folder):
+                    if file.endswith(".pkl"):
+                        print(f"Loading file: {file}")
+                        data_logger: UPFConnectedAgentDataLogger = pkl.load(open(results_folder + "/" + file, "rb"))
+                        fig = plt.figure()
+                        ax = fig.add_subplot(111, projection='3d')
+                        # plt.ion()
+                        # plt.show()
+                        for i in range(data_logger.i):
+                            # if i % 10 != 0:
+                            #     continue
+                            ax.cla()
+                            best_particle_log = data_logger.find_particle_log(
+                                data_logger.upf_connected_agent.best_particle).rpea_datalogger
+                            best_particle_log.plot_ca_corrected_estimated_trajectory(ax, color="gold",
+                                                                                     label="Active relative pose estimation",
+                                                                                     i=i)
+                            data_logger.connected_agent.set_plotting_settings(color="k")
+                            data_logger.connected_agent.plot_real_position(ax, annotation=f"Ground truth", alpha=1.,
+                                                                           i=i,
+                                                                           history=None)
+                            data_logger.host_agent.set_plotting_settings(color="darkgreen")
+                            data_logger.host_agent.plot_real_position(ax, annotation=f"Anchor", i=i, history=None)
+                            data_logger.connected_agent.plot_slam_position(ax, color="tab:blue",
+                                                                           annotation="SLAM position",
+                                                                           linestyle="-", alpha=1, i=i)
+                            fig.suptitle(f"Experiment results for anchor ID {anchor_id}")
+                            # plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                            ax.view_init(elev=60, azim=120)
+                            plt.savefig(f"{movie_folder}/frame_{i:05d}.png")
+                            # plt.pause(0.1)
+
+                    # data_logger.plot_self(title=f" Anchor ID: {anchor_id}")
+            except Exception as e:
+                print(f"Error loading results for anchor ID {anchor_id}: {e}")
+        # tas = create_experiment(results_folder, sig_v=0.08, sig_w=0.08, sig_uwb=0.25)
+        # tas.load_results("./Results/test/")
+
+    def test_make_movie(self):
+        import moviepy.video.io.ImageSequenceClip
+        for anchor_id in range(8):
+            image_folder = f"./Movies/AA_test_exp_8_{anchor_id}/movie_frames"
+            fps = 1
+            start = 0
+            end = 1620
+            # image_files = [os.path.join(image_folder, img)
+            #                for img in os.listdir(image_folder)
+            #                if img.endswith(".png")]
+            image_files = []
+            for i in range(start, end + 1):
+                image_name = f"frame_{i:05d}.png"
+                image_file = os.path.join(image_folder, image_name)
+                if os.path.exists(image_file):
+                    print(image_file)
+                    image_files.append(image_file)
+            clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip(image_files, fps=fps)
+            clip.write_videofile(f"AA_Anchor_{anchor_id}.mp4")
         # tas = create_experiment(results_folder, sig_v=0.08, sig_w=0.08, sig_uwb=0.25)
         # tas.load_results("./Results/test/")
 if __name__ == '__main__':

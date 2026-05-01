@@ -25,7 +25,7 @@ csv_writer.writerow(["id", "time", "mag_x", "mag_y", "mag_z", "T",
                      "gx","gy", "gz", "ax", "ay", "az",
                      "valid_ranges", "rid", "dist  m", "fp_rssi", "rx_rssi", "..."])
 record = True
-debug = False
+debug = True
 print("Listening for UDP data...")
 try:
     while True:
